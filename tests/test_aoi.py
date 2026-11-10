@@ -270,3 +270,18 @@ def test_lots_for_tiles(settings: Settings) -> None:
     ]
     only = [(t, p) for t, p in chosen if t == "Engineering"]
     assert [i.lot for i in engine.lots(settings, only)] == ["20001"]
+
+
+def test_measured_at_is_when_the_excel_file_was_created(tmp_path: Path) -> None:
+    from datetime import datetime
+
+    from aoi_metadata.models import FoundFile, SideFolder
+    from aoi_metadata.reader import read_file
+
+    path = workbook(tmp_path / "a.xlsx", ["CU41"])
+    book = load_workbook(path)
+    book.properties.created = datetime(2026, 9, 1, 8, 30)
+    book.save(path)
+    os.utime(path, (2_000_000_000, 2_000_000_000))  # a much later file date
+    side = SideFolder("Shippable", "P", "PN", "1", "BU-01", "Post FET", "1", "Front", tmp_path)
+    assert read_file(FoundFile(path, side)).measured_at == datetime(2026, 9, 1, 8, 30)

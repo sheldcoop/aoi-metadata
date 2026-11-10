@@ -86,6 +86,11 @@ def read_file(found: FoundFile, defects_sheet: str = "Defects") -> FileRead:
     try:
         result.measured_at = datetime.fromtimestamp(path.stat().st_mtime)
         workbook = load_workbook(path, read_only=True, data_only=True)
+        # When the AOI wrote the workbook: its own 'created' time, which stays the same when
+        # someone opens and saves the file again (the file date is only the fallback).
+        created = workbook.properties.created
+        if isinstance(created, datetime):
+            result.measured_at = created
     except (OSError, InvalidFileException, zipfile.BadZipFile, KeyError, ValueError) as exc:
         issue("ERROR", "unreadable_workbook", f"Workbook cannot be opened: {exc}")
         result.failed = True

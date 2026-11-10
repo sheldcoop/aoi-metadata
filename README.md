@@ -76,7 +76,7 @@ AOI.bat run --project "Shippable/Chiplet4Future" --test   to the test folder
 
 | Table | One row per | Columns |
 |---|---|---|
-| `AOI_Wide.xlsx` → *Wide* | panel side | Lot Type, Project, Part Number, Lot Number, **Lot Name**, Buildup, Process, Panel, Side, Files, Total Defects, Last Measured, Folder, then one column per code (`Not verified` last) |
+| `AOI_Wide.xlsx` → *Wide* | panel side | Lot Type, Project, Part Number, Lot Number, **Lot Name**, Buildup, Process, Panel, Side, Files, Total Defects, Last Measured (when the newest AOI file of the side was created), Folder, then one column per code (`Not verified` last) |
 | `AOI_Data` | workbook × code | Lot Type … Side, Verification, Count, Source File, Path, Measured At, Loaded At, Lot Key |
 | `AOI_Files` (also an Excel sheet) | workbook | Lot Type … Side, Source File, Defects, Read OK, Path, Measured At, Loaded At, Lot Key |
 | `AOI_Issues` (also an Excel sheet) | problem | Severity, Category, Lot Type, Project, Message, Source File, Path, Found At |
