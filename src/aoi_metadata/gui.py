@@ -1,0 +1,299 @@
+"""The window: folders, Run / Full reload / Test run, schedule, and the run log."""
+
+from __future__ import annotations
+
+import os
+import subprocess
+import sys
+import traceback
+from pathlib import Path
+
+from PySide6.QtCore import QObject, QThread, Signal
+from PySide6.QtWidgets import (
+    QApplication,
+    QComboBox,
+    QFileDialog,
+    QFormLayout,
+    QGroupBox,
+    QHBoxLayout,
+    QLabel,
+    QLineEdit,
+    QMessageBox,
+    QPlainTextEdit,
+    QPushButton,
+    QSpinBox,
+    QVBoxLayout,
+    QWidget,
+)
+
+from aoi_metadata import __version__, engine
+from aoi_metadata.settings import Settings, SettingsError, load, save
+
+TASK_NAME = "AOI Metadata Export"
+
+
+def bat_path() -> Path:
+    """AOI.bat in the project folder (two levels above the package)."""
+    return Path(__file__).resolve().parents[2] / "AOI.bat"
+
+
+def schedule_command(hours: int, start: str = "07:00") -> list[str]:
+    """schtasks arguments: every ``hours`` hours, as you, only while you are logged on."""
+    action = f'"{bat_path()}" scheduled'
+    return ["schtasks", "/Create", "/F", "/TN", TASK_NAME, "/SC", "HOURLY", "/MO", str(hours),
+            "/ST", start, "/TR", action]  # fmt: skip
+
+
+def run_schtasks(arguments: list[str]) -> tuple[bool, str]:
+    if os.name != "nt":
+        return False, "Scheduling works on Windows only."
+    try:
+        done = subprocess.run(  # noqa: S603
+            arguments, capture_output=True, text=True, timeout=30,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )  # fmt: skip
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return False, str(exc)
+    return done.returncode == 0, (done.stdout or done.stderr).strip()
+
+
+def open_path(path: Path) -> None:
+    if os.name == "nt":
+        os.startfile(path)  # type: ignore[attr-defined]  # noqa: S606
+    else:
+        subprocess.Popen(["xdg-open", str(path)])  # noqa: S603, S607
+
+
+class Worker(QObject):
+    line = Signal(str)
+    finished = Signal(bool, str)
+
+    def __init__(self, settings: Settings, options: engine.RunOptions) -> None:
+        super().__init__()
+        self.settings, self.options = settings, options
+
+    def run(self) -> None:
+        try:
+            report = engine.run(self.settings, self.options, progress=self.line.emit)
+        except engine.RunError as exc:
+            self.finished.emit(False, str(exc))
+            return
+        except Exception:  # shown in the log instead of closing the window
+            self.finished.emit(False, traceback.format_exc())
+            return
+        summary = ", ".join(
+            f"{k}: {report.run[k]}"
+            for k in (
+                "Files Found",
+                "Files Read",
+                "Files Failed",
+                "Side Folders",
+                "Defects",
+                "Issues",
+                "Seconds",
+            )  # fmt: skip
+        )
+        self.finished.emit(True, f"{summary}\nOutput: {report.output}")
+
+
+class Window(QWidget):
+    def __init__(self, settings_path: Path) -> None:
+        super().__init__()
+        self.settings_path = settings_path
+        self.thread: QThread | None = None
+        self.worker: Worker | None = None
+        self.last_output: Path | None = None
+        self.setWindowTitle(f"AOI Metadata Export {__version__}")
+        self.resize(820, 640)
+        try:
+            self.settings = load(settings_path)
+        except SettingsError as exc:
+            QMessageBox.warning(self, "Settings", f"{exc}\n\nThe defaults are used.")
+            self.settings = Settings()
+
+        layout = QVBoxLayout(self)
+
+        folders = QGroupBox("Folders")
+        form = QFormLayout(folders)
+        self.source = QLineEdit(self.settings.source_root)
+        self.output = QLineEdit(self.settings.output_dir)
+        form.addRow("Measurement results", self._with_browse(self.source))
+        form.addRow("Output folder", self._with_browse(self.output))
+        save_button = QPushButton("Save folders")
+        save_button.clicked.connect(self.save_settings)
+        form.addRow("", save_button)
+        layout.addWidget(folders)
+
+        runs = QGroupBox("Run")
+        run_layout = QVBoxLayout(runs)
+        row = QHBoxLayout()
+        self.run_button = QPushButton("Run AOI")
+        self.run_button.clicked.connect(lambda: self.start(engine.RunOptions()))
+        self.full_button = QPushButton("Full reload")
+        self.full_button.setToolTip("Read every workbook again (slow)")
+        self.full_button.clicked.connect(self.full_reload)
+        row.addWidget(self.run_button)
+        row.addWidget(self.full_button)
+        row.addStretch()
+        run_layout.addLayout(row)
+        test_row = QHBoxLayout()
+        self.projects = QComboBox()
+        self.projects.setMinimumWidth(320)
+        load_button = QPushButton("Load projects")
+        load_button.clicked.connect(self.load_projects)
+        self.test_button = QPushButton("Test run")
+        self.test_button.setToolTip("Only this project; written to a test folder on this PC")
+        self.test_button.clicked.connect(self.test_run)
+        test_row.addWidget(QLabel("Test:"))
+        test_row.addWidget(self.projects, 1)
+        test_row.addWidget(load_button)
+        test_row.addWidget(self.test_button)
+        run_layout.addLayout(test_row)
+        open_row = QHBoxLayout()
+        open_folder = QPushButton("Open output folder")
+        open_folder.clicked.connect(self.open_output)
+        open_excel = QPushButton("Open AOI_Wide.xlsx")
+        open_excel.clicked.connect(self.open_excel)
+        open_row.addWidget(open_folder)
+        open_row.addWidget(open_excel)
+        open_row.addStretch()
+        run_layout.addLayout(open_row)
+        layout.addWidget(runs)
+
+        schedule = QGroupBox("Schedule (Windows Task Scheduler)")
+        schedule_row = QHBoxLayout(schedule)
+        self.hours = QSpinBox()
+        self.hours.setRange(1, 24)
+        self.hours.setValue(self.settings.schedule_hours)
+        self.hours.setSuffix(" h")
+        create = QPushButton("Create / update")
+        create.clicked.connect(self.schedule)
+        remove = QPushButton("Remove")
+        remove.clicked.connect(self.unschedule)
+        schedule_row.addWidget(QLabel("Run every"))
+        schedule_row.addWidget(self.hours)
+        schedule_row.addWidget(create)
+        schedule_row.addWidget(remove)
+        schedule_row.addStretch()
+        layout.addWidget(schedule)
+
+        self.log = QPlainTextEdit()
+        self.log.setReadOnly(True)
+        layout.addWidget(self.log, 1)
+        self.say(f"Settings: {self.settings_path}")
+
+    # -- helpers ---------------------------------------------------------------------
+
+    def _with_browse(self, edit: QLineEdit) -> QWidget:
+        box = QWidget()
+        row = QHBoxLayout(box)
+        row.setContentsMargins(0, 0, 0, 0)
+        row.addWidget(edit, 1)
+        button = QPushButton("Browse ...")
+        button.clicked.connect(lambda: self._browse(edit))
+        row.addWidget(button)
+        return box
+
+    def _browse(self, edit: QLineEdit) -> None:
+        folder = QFileDialog.getExistingDirectory(self, "Choose folder", edit.text())
+        if folder:
+            edit.setText(str(Path(folder)))
+
+    def say(self, text: str) -> None:
+        self.log.appendPlainText(text)
+
+    def _current(self) -> Settings:
+        self.settings.source_root = self.source.text().strip() or self.settings.source_root
+        self.settings.output_dir = self.output.text().strip() or self.settings.output_dir
+        self.settings.schedule_hours = self.hours.value()
+        return self.settings
+
+    def save_settings(self) -> None:
+        try:
+            save(self._current(), self.settings_path)
+        except OSError as exc:
+            QMessageBox.warning(self, "Settings", f"Cannot save: {exc}")
+            return
+        self.say(f"Saved {self.settings_path}")
+
+    # -- runs ------------------------------------------------------------------------
+
+    def load_projects(self) -> None:
+        self.projects.clear()
+        found = engine.projects(self._current())
+        for lot_type, folder in found:
+            self.projects.addItem(f"{lot_type}/{folder.name}", (lot_type, folder.name))
+        self.say(f"{len(found)} project(s) found." if found else
+                 f"No projects found below {self.settings.root}.")  # fmt: skip
+
+    def test_run(self) -> None:
+        chosen = self.projects.currentData()
+        if not chosen:
+            QMessageBox.information(self, "Test run", "Load the projects and choose one first.")
+            return
+        self.start(engine.RunOptions(test_project=chosen))
+
+    def full_reload(self) -> None:
+        answer = QMessageBox.question(
+            self, "Full reload", "Read every AOI workbook again? This can take long."
+        )
+        if answer == QMessageBox.StandardButton.Yes:
+            self.start(engine.RunOptions(full_reload=True))
+
+    def start(self, options: engine.RunOptions) -> None:
+        if self.thread is not None:
+            return
+        settings = self._current()
+        self.last_output = engine.places(settings, options)[0]
+        self.say(f"\n--- Run ({options.mode}) ---")
+        for button in (self.run_button, self.full_button, self.test_button):
+            button.setEnabled(False)
+        self.thread = QThread()
+        self.worker = Worker(settings, options)
+        self.worker.moveToThread(self.thread)
+        self.thread.started.connect(self.worker.run)
+        self.worker.line.connect(self.say)
+        self.worker.finished.connect(self.done)
+        self.thread.start()
+
+    def done(self, ok: bool, message: str) -> None:
+        self.say(("Finished. " if ok else "STOPPED: ") + message)
+        assert self.thread is not None
+        self.thread.quit()
+        self.thread.wait()
+        self.thread = self.worker = None
+        for button in (self.run_button, self.full_button, self.test_button):
+            button.setEnabled(True)
+
+    def open_output(self) -> None:
+        folder = self.last_output or self._current().output
+        if folder.is_dir():
+            open_path(folder)
+        else:
+            self.say(f"Output folder does not exist yet: {folder}")
+
+    def open_excel(self) -> None:
+        folder = self.last_output or self._current().output
+        path = folder / f"{engine.WIDE}.xlsx"
+        if path.is_file():
+            open_path(path)
+        else:
+            self.say(f"Not written yet: {path}")
+
+    # -- schedule --------------------------------------------------------------------
+
+    def schedule(self) -> None:
+        self.save_settings()
+        ok, text = run_schtasks(schedule_command(self.hours.value()))
+        self.say(("Scheduled: " if ok else "Schedule failed: ") + text)
+
+    def unschedule(self) -> None:
+        ok, text = run_schtasks(["schtasks", "/Delete", "/F", "/TN", TASK_NAME])
+        self.say(("Removed: " if ok else "Remove failed: ") + text)
+
+
+def start(settings_path: Path) -> int:
+    app = QApplication.instance() or QApplication(sys.argv)
+    window = Window(settings_path)
+    window.show()
+    return app.exec()
