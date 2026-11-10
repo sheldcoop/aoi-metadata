@@ -206,8 +206,25 @@ def test_positional_and_missing_verification(settings: Settings, tree: dict[str,
 
 
 def test_lock_blocks_second_run(settings: Settings) -> None:
-    with engine.RunLock(settings.cache), pytest.raises(engine.RunError):
+    with engine.RunLock(settings.cache), pytest.raises(engine.RunError, match="busy"):
         engine.run(settings, engine.RunOptions())
+    assert not (settings.cache / engine.LOCK_FILE).exists()
+
+
+def test_left_over_lock_is_taken_over(settings: Settings) -> None:
+    import subprocess
+    import sys
+
+    done = subprocess.run([sys.executable, "-c", "import os; print(os.getpid())"],
+                          capture_output=True, text=True, check=True)  # fmt: skip
+    dead = int(done.stdout)  # that process has ended
+    assert not engine.pid_alive(dead) and engine.pid_alive(os.getpid())
+    lock = settings.cache / engine.LOCK_FILE
+    lock.parent.mkdir(parents=True, exist_ok=True)
+    lock.write_text(f"{dead} 2026-11-10 09:00:00")
+    report = engine.run(settings, engine.RunOptions())
+    assert report.run["Files Found"] == 8
+    assert not lock.exists()
 
 
 def test_settings_roundtrip(tmp_path: Path) -> None:

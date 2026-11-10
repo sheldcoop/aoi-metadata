@@ -103,22 +103,76 @@ def places(settings: Settings, options: RunOptions) -> tuple[Path, Path]:
     return settings.output, settings.cache
 
 
+def pid_alive(pid: int) -> bool:
+    """True when a process with this id is running."""
+    if pid <= 0:
+        return False
+    if os.name == "nt":
+        import ctypes
+
+        kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
+        handle = kernel32.OpenProcess(0x1000, False, pid)  # QUERY_LIMITED_INFORMATION
+        if not handle:
+            return kernel32.GetLastError() == 5  # access denied: it exists
+        try:
+            code = ctypes.c_ulong()
+            if not kernel32.GetExitCodeProcess(handle, ctypes.byref(code)):
+                return True
+            return code.value == 259  # STILL_ACTIVE
+        finally:
+            kernel32.CloseHandle(handle)
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+    return True
+
+
 class RunLock:
-    """Stops a scheduled run and a run from the window writing at the same time."""
+    """Stops a scheduled run and a run from the window writing at the same time.
+
+    The lock file holds the process id of the run. A lock whose process is no longer
+    running (the window was closed during a run, the PC restarted, ...) is left over
+    and is taken over without asking.
+    """
 
     def __init__(self, folder: Path) -> None:
         self.path = folder / LOCK_FILE
 
+    def _holder(self) -> tuple[int, str] | None:
+        """(process id, started) of a run that still holds the lock, else None."""
+        try:
+            text = self.path.read_text(encoding="utf-8").strip()
+            age = time.time() - self.path.stat().st_mtime
+        except OSError:
+            return None
+        pid_text, _, started = text.partition(" ")
+        try:
+            pid = int(pid_text)
+        except ValueError:
+            pid = 0
+        if age >= LOCK_MAX_AGE:
+            return None
+        if pid and not pid_alive(pid):
+            return None
+        return pid, started or "?"
+
     def __enter__(self) -> RunLock:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         if self.path.exists():
-            age = time.time() - self.path.stat().st_mtime
-            if age < LOCK_MAX_AGE:
+            holder = self._holder()
+            if holder is not None:
+                pid, started = holder
                 raise RunError(
-                    f"Another AOI run is busy (lock file {self.path}). Wait for it to finish; "
-                    f"delete the file only if no run is going on."
+                    f"Another AOI run is busy (started {started}, process {pid}). Wait for it "
+                    f"to finish. Lock file: {self.path}"
                 )
-        self.path.write_text(f"{os.getpid()} {datetime.now():%Y-%m-%d %H:%M:%S}")
+            logger.warning("Left-over lock file %s taken over.", self.path)
+        self.path.write_text(f"{os.getpid()} {datetime.now():%Y-%m-%d %H:%M:%S}", encoding="utf-8")
         return self
 
     def __exit__(self, *_: object) -> None:

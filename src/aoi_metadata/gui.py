@@ -9,6 +9,7 @@ import traceback
 from pathlib import Path
 
 from PySide6.QtCore import QObject, QSize, Qt, QThread, Signal
+from PySide6.QtGui import QCloseEvent
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
@@ -408,6 +409,16 @@ class Window(QWidget):
         self.worker.line.connect(self.say)
         self.worker.finished.connect(self.done)
         self.thread.start()
+
+    def closeEvent(self, event: QCloseEvent) -> None:  # noqa: N802 (Qt name)
+        """Closing during a run would stop it halfway: wait for it instead."""
+        if self.thread is not None:
+            QMessageBox.information(
+                self, "Run busy", "A run is still going on. Close the window when it is finished."
+            )
+            event.ignore()
+            return
+        event.accept()
 
     def done(self, ok: bool, message: str) -> None:
         self.say(("Finished. " if ok else "STOPPED: ") + message)
