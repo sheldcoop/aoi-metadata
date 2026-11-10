@@ -3,7 +3,12 @@
 python -m aoi_metadata                       the window
 python -m aoi_metadata run                   one run, no window (Task Scheduler)
 python -m aoi_metadata run --full-reload     read every workbook again
-python -m aoi_metadata run --test "Shippable/Chiplet4Future"
+python -m aoi_metadata run --lot-type Shippable
+python -m aoi_metadata run --project "Shippable/Chiplet4Future" --lot 19621,19622
+python -m aoi_metadata run --project "Engineering/ProjX" --test    (to a test folder)
+
+Options can be repeated or comma separated. A run with --lot-type, --project or
+--lot only updates those lots; every other lot keeps its rows in the output.
 """
 
 from __future__ import annotations
@@ -14,6 +19,7 @@ import sys
 from pathlib import Path
 
 from aoi_metadata import __version__, engine
+from aoi_metadata.models import Scope
 from aoi_metadata.settings import SETTINGS_FILE, SettingsError, load
 
 PROJECT_DIR = Path(__file__).resolve().parents[2]
@@ -31,23 +37,31 @@ def setup_logging(folder: Path) -> Path:
     return path
 
 
-def parse_test(value: str | None) -> tuple[str, str] | None:
-    if not value:
-        return None
-    lot_type, _, project = value.partition("/")
-    if not lot_type.strip() or not project.strip():
-        raise ValueError("--test needs 'Lot type/Project', e.g. Shippable/Chiplet4Future")
-    return lot_type.strip(), project.strip()
+def _split(values: list[str] | None) -> list[str]:
+    """['a, b', 'c'] -> ['a', 'b', 'c']."""
+    return [part.strip() for v in values or [] for part in v.split(",") if part.strip()]
+
+
+def parse_scope(args: argparse.Namespace) -> Scope:
+    projects = _split(args.project)
+    for project in projects:
+        lot_type, _, name = project.partition("/")
+        if not lot_type.strip() or not name.strip():
+            raise ValueError(
+                f"--project needs 'Lot type/Project' (e.g. Shippable/Chiplet4Future), "
+                f"not {project!r}"
+            )
+    return Scope.make(_split(args.lot_type), projects, _split(args.lot))
 
 
 def _run(args: argparse.Namespace) -> int:
     try:
         settings = load(args.settings)
-        test = parse_test(args.test)
+        scope = parse_scope(args)
     except (SettingsError, ValueError) as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 1
-    options = engine.RunOptions(full_reload=args.full_reload, test_project=test)
+    options = engine.RunOptions(full_reload=args.full_reload, scope=scope, test=args.test)
     try:
         log = setup_logging(settings.cache / "logs")
     except OSError:
@@ -82,8 +96,13 @@ def main(argv: list[str] | None = None) -> int:
     sub = parser.add_subparsers(dest="command")
     run = sub.add_parser("run", help="one run without a window")
     run.add_argument("--full-reload", action="store_true", help="read every workbook again")
-    run.add_argument("--test", metavar="LOTTYPE/PROJECT",
-                     help="only this project, written to a test folder")  # fmt: skip
+    run.add_argument("--lot-type", action="append", metavar="NAME",
+                     help="only this lot type, e.g. Shippable or Engineering")  # fmt: skip
+    run.add_argument("--project", action="append", metavar="LOTTYPE/PROJECT",
+                     help="only this project, e.g. Shippable/Chiplet4Future")  # fmt: skip
+    run.add_argument("--lot", action="append", metavar="LOT", help="only this lot, e.g. 19621")
+    run.add_argument("--test", action="store_true",
+                     help="write to a test folder on this PC, not the output folder")  # fmt: skip
     args = parser.parse_args(argv)
     if args.command == "run":
         return _run(args)

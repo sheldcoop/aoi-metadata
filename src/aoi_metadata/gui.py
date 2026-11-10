@@ -1,4 +1,4 @@
-"""The window: folders, Run / Full reload / Test run, schedule, and the run log."""
+"""The window: folders, what to run (lot types, projects, lots), schedule, and the run log."""
 
 from __future__ import annotations
 
@@ -8,16 +8,18 @@ import sys
 import traceback
 from pathlib import Path
 
-from PySide6.QtCore import QObject, QThread, Signal
+from PySide6.QtCore import QObject, Qt, QThread, Signal
 from PySide6.QtWidgets import (
     QApplication,
-    QComboBox,
+    QCheckBox,
     QFileDialog,
     QFormLayout,
     QGroupBox,
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QListWidget,
+    QListWidgetItem,
     QMessageBox,
     QPlainTextEdit,
     QPushButton,
@@ -27,6 +29,7 @@ from PySide6.QtWidgets import (
 )
 
 from aoi_metadata import __version__, engine
+from aoi_metadata.models import Scope
 from aoi_metadata.settings import Settings, SettingsError, load, save
 
 TASK_NAME = "AOI Metadata Export"
@@ -124,41 +127,65 @@ class Window(QWidget):
         form.addRow("", save_button)
         layout.addWidget(folders)
 
-        runs = QGroupBox("Run")
-        run_layout = QVBoxLayout(runs)
-        row = QHBoxLayout()
-        self.run_button = QPushButton("Run AOI")
-        self.run_button.clicked.connect(lambda: self.start(engine.RunOptions()))
-        self.full_button = QPushButton("Full reload")
-        self.full_button.setToolTip("Read every workbook again (slow)")
-        self.full_button.clicked.connect(self.full_reload)
-        row.addWidget(self.run_button)
-        row.addWidget(self.full_button)
-        row.addStretch()
-        run_layout.addLayout(row)
-        test_row = QHBoxLayout()
-        self.projects = QComboBox()
-        self.projects.setMinimumWidth(320)
+        scope = QGroupBox("What to run")
+        scope_layout = QVBoxLayout(scope)
+        type_row = QHBoxLayout()
+        self.lot_type_boxes: dict[str, QCheckBox] = {}
+        for folder, lot_type in self.settings.lot_types.items():
+            box = QCheckBox(f"{folder}  ({lot_type})")
+            box.setChecked(True)
+            box.toggled.connect(self.filter_projects)
+            self.lot_type_boxes[lot_type] = box
+            type_row.addWidget(box)
+        type_row.addStretch()
+        scope_layout.addLayout(type_row)
+        project_row = QHBoxLayout()
+        project_row.addWidget(QLabel("Projects:"))
+        self.project_filter = QLineEdit()
+        self.project_filter.setPlaceholderText("type to filter the list")
+        self.project_filter.textChanged.connect(self.filter_projects)
+        project_row.addWidget(self.project_filter, 1)
         load_button = QPushButton("Load projects")
         load_button.clicked.connect(self.load_projects)
+        clear_button = QPushButton("Untick all")
+        clear_button.clicked.connect(self.untick_projects)
+        project_row.addWidget(load_button)
+        project_row.addWidget(clear_button)
+        scope_layout.addLayout(project_row)
+        self.projects = QListWidget()
+        self.projects.setMaximumHeight(130)
+        self.projects.setToolTip("Tick projects to run only those. Nothing ticked: all projects.")
+        scope_layout.addWidget(self.projects)
+        lot_row = QHBoxLayout()
+        lot_row.addWidget(QLabel("Lots:"))
+        self.lots = QLineEdit()
+        self.lots.setPlaceholderText("e.g. 19621, 19622   (empty: all lots)")
+        lot_row.addWidget(self.lots, 1)
+        scope_layout.addLayout(lot_row)
+        scope_layout.addWidget(QLabel(
+            "Nothing ticked or typed means everything. A run for some projects or lots "
+            "updates only those; all other lots keep their rows in the output."
+        ))  # fmt: skip
+        row = QHBoxLayout()
+        self.run_button = QPushButton("Run AOI")
+        self.run_button.clicked.connect(lambda: self.start_scoped(test=False))
         self.test_button = QPushButton("Test run")
-        self.test_button.setToolTip("Only this project; written to a test folder on this PC")
-        self.test_button.clicked.connect(self.test_run)
-        test_row.addWidget(QLabel("Test:"))
-        test_row.addWidget(self.projects, 1)
-        test_row.addWidget(load_button)
-        test_row.addWidget(self.test_button)
-        run_layout.addLayout(test_row)
-        open_row = QHBoxLayout()
+        self.test_button.setToolTip("Same choice, but written to a test folder on this PC")
+        self.test_button.clicked.connect(lambda: self.start_scoped(test=True))
+        self.full_button = QPushButton("Full reload")
+        self.full_button.setToolTip("Read every workbook of the choice again (slow)")
+        self.full_button.clicked.connect(self.full_reload)
         open_folder = QPushButton("Open output folder")
         open_folder.clicked.connect(self.open_output)
         open_excel = QPushButton("Open AOI_Wide.xlsx")
         open_excel.clicked.connect(self.open_excel)
-        open_row.addWidget(open_folder)
-        open_row.addWidget(open_excel)
-        open_row.addStretch()
-        run_layout.addLayout(open_row)
-        layout.addWidget(runs)
+        for button in (self.run_button, self.test_button, self.full_button):
+            row.addWidget(button)
+        row.addStretch()
+        row.addWidget(open_folder)
+        row.addWidget(open_excel)
+        scope_layout.addLayout(row)
+        layout.addWidget(scope)
 
         schedule = QGroupBox("Schedule (Windows Task Scheduler)")
         schedule_row = QHBoxLayout(schedule)
@@ -219,26 +246,66 @@ class Window(QWidget):
     # -- runs ------------------------------------------------------------------------
 
     def load_projects(self) -> None:
+        ticked = set(self._ticked_projects())
         self.projects.clear()
         found = engine.projects(self._current())
         for lot_type, folder in found:
-            self.projects.addItem(f"{lot_type}/{folder.name}", (lot_type, folder.name))
+            name = f"{lot_type}/{folder.name}"
+            item = QListWidgetItem(name)
+            item.setData(Qt.ItemDataRole.UserRole, lot_type)
+            item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+            item.setCheckState(Qt.CheckState.Checked if name in ticked else Qt.CheckState.Unchecked)
+            self.projects.addItem(item)
+        self.filter_projects()
         self.say(f"{len(found)} project(s) found." if found else
                  f"No projects found below {self.settings.root}.")  # fmt: skip
 
-    def test_run(self) -> None:
-        chosen = self.projects.currentData()
-        if not chosen:
-            QMessageBox.information(self, "Test run", "Load the projects and choose one first.")
-            return
-        self.start(engine.RunOptions(test_project=chosen))
+    def filter_projects(self) -> None:
+        text = self.project_filter.text().strip().lower()
+        types = {t for t, box in self.lot_type_boxes.items() if box.isChecked()}
+        for i in range(self.projects.count()):
+            item = self.projects.item(i)
+            visible = item.data(Qt.ItemDataRole.UserRole) in types and text in item.text().lower()
+            item.setHidden(not visible)
+
+    def untick_projects(self) -> None:
+        for i in range(self.projects.count()):
+            self.projects.item(i).setCheckState(Qt.CheckState.Unchecked)
+
+    def _ticked_projects(self) -> list[str]:
+        types = {t for t, box in self.lot_type_boxes.items() if box.isChecked()}
+        return [
+            item.text()
+            for item in (self.projects.item(i) for i in range(self.projects.count()))
+            if item.checkState() == Qt.CheckState.Checked
+            and item.data(Qt.ItemDataRole.UserRole) in types
+        ]
+
+    def scope(self) -> Scope | None:
+        """The choice in the window; None (with a message) when nothing can run."""
+        types = [t for t, box in self.lot_type_boxes.items() if box.isChecked()]
+        if not types:
+            QMessageBox.information(self, "Run", "Tick at least one lot type.")
+            return None
+        lot_types = None if len(types) == len(self.lot_type_boxes) else types
+        lots = [p.strip() for p in self.lots.text().replace(";", ",").split(",") if p.strip()]
+        return Scope.make(lot_types, self._ticked_projects() or None, lots or None)
+
+    def start_scoped(self, test: bool, full_reload: bool = False) -> None:
+        scope = self.scope()
+        if scope is not None:
+            self.start(engine.RunOptions(full_reload=full_reload, scope=scope, test=test))
 
     def full_reload(self) -> None:
+        scope = self.scope()
+        if scope is None:
+            return
         answer = QMessageBox.question(
-            self, "Full reload", "Read every AOI workbook again? This can take long."
-        )
+            self, "Full reload",
+            f"Read every AOI workbook again ({scope.describe()})? This can take long.",
+        )  # fmt: skip
         if answer == QMessageBox.StandardButton.Yes:
-            self.start(engine.RunOptions(full_reload=True))
+            self.start(engine.RunOptions(full_reload=True, scope=scope))
 
     def start(self, options: engine.RunOptions) -> None:
         if self.thread is not None:

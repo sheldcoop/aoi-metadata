@@ -80,7 +80,7 @@ def read_file(found: FoundFile, defects_sheet: str = "Defects") -> FileRead:
     def issue(severity: str, category: str, message: str) -> None:
         result.issues.append(
             IssueRow(severity, category, message, path.name, "", found.side.lot_type,
-                     found.side.project)
+                     found.side.project, found.side.lot)
         )  # fmt: skip
 
     try:

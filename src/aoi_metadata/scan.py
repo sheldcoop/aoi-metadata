@@ -82,6 +82,8 @@ class Scanner:
         self.root: Path = Path()
         self.lot_type = ""
         self.project = ""
+        self.lot = ""
+        self.lots: frozenset[str] | None = None  # only these lot folders (lower case)
         self.issues: list[IssueRow] = []
 
     # -- helpers ---------------------------------------------------------------------
@@ -97,7 +99,7 @@ class Scanner:
     ) -> None:
         self.issues.append(
             IssueRow(severity, category, message, file, self._relative(path), self.lot_type,
-                     self.project)
+                     self.project, self.lot)
         )  # fmt: skip
 
     def _listing(self, folder: Path) -> tuple[list[Path], list[Path]] | None:
@@ -130,7 +132,9 @@ class Scanner:
         for aoi_dir, between in self._aoi_folders(project_dir):
             lot = aoi_dir.parent.name
             part = between[0] if len(between) >= 2 else ""
+            self.lot = lot
             found.extend(self._aoi(aoi_dir, part, lot))
+            self.lot = ""
         return found
 
     def _aoi_folders(self, project_dir: Path) -> list[tuple[Path, list[str]]]:
@@ -147,7 +151,10 @@ class Scanner:
                     if self._skipped(sub):
                         continue
                     if sub.name.strip().lower() == self.machine:
-                        if names:  # an AOI folder directly in the project has no lot
+                        if names and self.lots is not None:
+                            if names[-1].strip().lower() in self.lots:
+                                result.append((sub, names))
+                        elif names:  # an AOI folder directly in the project has no lot
                             result.append((sub, names))
                         else:
                             self._issue(
@@ -282,8 +289,14 @@ class Scanner:
 
 
 def scan_project(
-    project_dir: Path, lot_type: str, root: Path, machine_folder: str, skip_folders: list[str]
+    project_dir: Path,
+    lot_type: str,
+    root: Path,
+    machine_folder: str,
+    skip_folders: list[str],
+    lots: frozenset[str] | None = None,
 ) -> tuple[list[FoundFile], list[IssueRow]]:
     scanner = Scanner(machine_folder, skip_folders)
+    scanner.lots = lots
     found = scanner.scan(project_dir, lot_type, root)
     return found, scanner.issues

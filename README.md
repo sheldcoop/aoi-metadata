@@ -23,12 +23,20 @@ Output folder (default %OneDriveCommercial%\AOI_Metadata)
 1. Double-click **`AOI.bat`**. The first time it installs what it needs, which takes
    a few minutes. After a `git pull` it updates itself the same way.
 2. In the window, set the two folders and press **Save folders**.
-3. Click **Load projects**, pick one project and press **Test run**. The test
-   writes to a test folder on your PC and never touches the real output.
-   **Open output folder** shows where that folder is.
-4. **Run AOI** reads everything. The first run takes long; later runs only read
-   new or changed workbooks.
-5. **Schedule**: *Create / update* runs it every few hours without a window.
+3. Under **What to run**, choose what a run covers:
+   - **Lot types:** tick *01_Customer shippable lots* and/or *02_Engineering lots*.
+   - **Projects:** click **Load projects** and tick the ones you want. Use the filter box
+     to find one quickly.
+   - **Lots:** type lot numbers, e.g. `19621, 19622`.
+
+   Nothing ticked or typed means **everything**. A run for some projects or lots
+   updates **only those**; every other lot keeps its rows in the output.
+4. **Test run** runs the same choice but writes to a test folder on your PC, so it
+   never touches the real output. **Open output folder** shows where that folder is.
+5. **Run AOI** writes to the output folder. The first run of everything takes long;
+   later runs only read new or changed workbooks. **Full reload** reads every workbook
+   in the choice again.
+6. **Schedule**: *Create / update* runs everything every few hours without a window.
 
 From a command line:
 
@@ -36,7 +44,11 @@ From a command line:
 AOI.bat                                          the window
 AOI.bat scheduled                                one run (what the schedule does)
 AOI.bat run --full-reload                        read every workbook again
-AOI.bat run --test "Shippable/Chiplet4Future"    one project, to the test folder
+AOI.bat run --lot-type Shippable                 customer shippable lots only
+AOI.bat run --lot-type Engineering               engineering lots only
+AOI.bat run --project "Shippable/Chiplet4Future" one project (repeat for more)
+AOI.bat run --lot 19621,19622                    these lots only
+AOI.bat run --project "Shippable/Chiplet4Future" --test   to the test folder
 ```
 
 ## How a workbook is counted
@@ -61,11 +73,17 @@ AOI.bat run --test "Shippable/Chiplet4Future"    one project, to the test folder
 
 | Table | One row per | Columns |
 |---|---|---|
-| `AOI_Wide.xlsx` → *Wide* | panel side | Lot Type, Project, Part Number, Lot Number, Buildup, Process, Panel, Side, Files, Total Defects, Last Measured, Folder, then one column per code (`Not verified` last) |
+| `AOI_Wide.xlsx` → *Wide* | panel side | Lot Type, Project, Part Number, Lot Number, **Lot Name**, Buildup, Process, Panel, Side, Files, Total Defects, Last Measured, Folder, then one column per code (`Not verified` last) |
 | `AOI_Data` | workbook × code | Lot Type … Side, Verification, Count, Source File, Path, Measured At, Loaded At, Lot Key |
 | `AOI_Files` (also an Excel sheet) | workbook | Lot Type … Side, Source File, Defects, Read OK, Path, Measured At, Loaded At, Lot Key |
 | `AOI_Issues` (also an Excel sheet) | problem | Severity, Category, Lot Type, Project, Message, Source File, Path, Found At |
 | `AOI_Runs` | run | Run At, Mode, Version, Result, files found / read / unchanged / removed / failed, Side Folders, Defects, Issues, Seconds |
+
+**Lot Name** is empty, ready for you to fill in on the *Wide* sheet. The next run
+reads the names from the existing `AOI_Wide.xlsx` (by Lot Type + Lot Number) and
+writes them again, so they are kept. Save and close the file before a run: if it is
+open, a copy with the time in its name is written, and names typed into that copy are
+not read back.
 
 The column names, `Buildup` (`BU-01`), `Side` (`Front` / `Back`) and `Lot Key`
 (`Shippable|19621`) match the HRM + PRF dashboard, so the tables can be joined. If

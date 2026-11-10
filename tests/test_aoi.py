@@ -9,7 +9,7 @@ from openpyxl import Workbook, load_workbook
 
 from aoi_metadata import engine
 from aoi_metadata.__main__ import main
-from aoi_metadata.models import NOT_VERIFIED
+from aoi_metadata.models import NOT_VERIFIED, Scope
 from aoi_metadata.reader import code
 from aoi_metadata.scan import buildup_name, panel_name
 from aoi_metadata.settings import Settings, SettingsError, load, save
@@ -133,13 +133,61 @@ def test_second_run_reads_only_changed(settings: Settings, tree: dict[str, Path]
 
 
 def test_test_run_uses_test_folder(settings: Settings) -> None:
-    report = engine.run(settings, engine.RunOptions(test_project=("Engineering", "ProjX")))
+    scope = Scope.make(projects=["Engineering/ProjX"])
+    report = engine.run(settings, engine.RunOptions(scope=scope, test=True))
     assert report.output == settings.cache / "test" / "output"
     data = pd.read_parquet(report.output / "AOI_Data.parquet")
     assert set(data["Project"]) == {"ProjX"}
     assert not settings.output.exists()
     with pytest.raises(engine.RunError):
-        engine.run(settings, engine.RunOptions(test_project=("Engineering", "Nope")))
+        engine.run(settings, engine.RunOptions(scope=Scope.make(projects=["Engineering/Nope"])))
+
+
+def test_scoped_run_keeps_other_lots(settings: Settings, tree: dict[str, Path]) -> None:
+    engine.run(settings, engine.RunOptions())
+    issues_before = len(pd.read_parquet(settings.output / "AOI_Issues.parquet"))
+    # Change a Shippable file and delete an Engineering one, then run Shippable only.
+    workbook(tree["front"], ["N"])
+    os.utime(tree["front"], (1, 1))
+    tree["rescan2"].unlink()
+    report = engine.run(settings, engine.RunOptions(scope=Scope.make(["Shippable"])))
+    assert report.run["Files Found"] == 4 and report.run["Files Read"] == 1
+    assert report.run["Files Removed"] == 0  # Engineering was not looked at
+    data = pd.read_parquet(report.output / "AOI_Data.parquet")
+    assert data[data["Buildup"] == "BU-02"]["Count"].sum() == 1  # updated
+    assert "r2.xlsx" in set(data["Source File"])  # kept from before
+    issues = pd.read_parquet(report.output / "AOI_Issues.parquet")
+    assert len(issues) == issues_before  # Engineering folder issues kept
+
+    # One lot only: the Engineering lot 20001 is looked at again, r2.xlsx goes.
+    report = engine.run(settings, engine.RunOptions(scope=Scope.make(lots=["20001"])))
+    assert report.run["Files Removed"] == 1
+    data = pd.read_parquet(report.output / "AOI_Data.parquet")
+    assert "r2.xlsx" not in set(data["Source File"])
+    assert set(data["Lot Number"]) == {"19621", "20001"}
+    issues = pd.read_parquet(report.output / "AOI_Issues.parquet")
+    assert "possible_rescan" not in set(issues["Category"])
+    assert "legacy_xls" in set(issues["Category"])
+
+
+def test_lot_name_is_empty_and_kept(settings: Settings) -> None:
+    report = engine.run(settings, engine.RunOptions())
+    path = report.output / "AOI_Wide.xlsx"
+    wb = load_workbook(path)
+    ws = wb["Wide"]
+    header = [c.value for c in ws[1]]
+    assert header[:6] == ["Lot Type", "Project", "Part Number", "Lot Number", "Lot Name",
+                          "Buildup"]  # fmt: skip
+    assert all(row[4] is None for row in ws.iter_rows(min_row=2, values_only=True))
+    for row in ws.iter_rows(min_row=2):
+        if row[3].value == "19621":
+            row[4].value = "Golden run"
+            break
+    wb.save(path)
+    engine.run(settings, engine.RunOptions())
+    wide = pd.read_excel(path, sheet_name="Wide", dtype=str)
+    names = wide.groupby("Lot Number")["Lot Name"].first().fillna("").to_dict()
+    assert names == {"19621": "Golden run", "20001": ""}
 
 
 def test_positional_and_missing_verification(settings: Settings, tree: dict[str, Path]) -> None:
@@ -181,4 +229,16 @@ def test_cli_run(settings: Settings, tmp_path: Path, capsys: pytest.CaptureFixtu
     save(settings, path)
     assert main(["--settings", str(path), "run"]) == 0
     assert "Files Found" in capsys.readouterr().out
-    assert main(["--settings", str(path), "run", "--test", "bad"]) == 1
+    assert main(["--settings", str(path), "run", "--project", "bad"]) == 1
+    args = [
+        "--settings",
+        str(path),
+        "run",
+        "--lot-type",
+        "Engineering",
+        "--lot",
+        "20001,x",
+        "--test",
+    ]
+    assert main(args) == 0
+    assert "test, lot types: engineering; lots: 20001, x" in capsys.readouterr().out
