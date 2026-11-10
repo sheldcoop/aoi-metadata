@@ -288,6 +288,18 @@ class Scanner:
         return found
 
 
+def find_lots(
+    project_dir: Path, machine_folder: str, skip_folders: list[str]
+) -> list[tuple[str, str]]:
+    """(part, lot) of every lot folder below ``project_dir`` that holds an AOI folder."""
+    scanner = Scanner(machine_folder, skip_folders)
+    scanner.root = project_dir
+    return [
+        (between[0] if len(between) >= 2 else "", aoi_dir.parent.name)
+        for aoi_dir, between in scanner._aoi_folders(project_dir)
+    ]
+
+
 def scan_project(
     project_dir: Path,
     lot_type: str,

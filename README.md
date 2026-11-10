@@ -27,9 +27,12 @@ Output folder (default %OneDriveCommercial%\AOI_Metadata)
    - **Lot types:** tick *01_Customer shippable lots* and/or *02_Engineering lots*.
    - **Projects:** click **Load projects** and tick the ones you want. Use the filter box
      to find one quickly.
-   - **Lots:** type lot numbers, e.g. `19621, 19622`.
+   - **Lots:** click **Load lots**. Every lot with an AOI folder in the ticked projects
+     (or in all projects, if none is ticked) appears as a tile showing the lot number
+     and part. Click tiles to select them and click again to deselect. **Select all**,
+     **Clear** and a filter box help with long lists.
 
-   Nothing ticked or typed means **everything**. A run for some projects or lots
+   Nothing ticked or selected means **everything**. A run for some projects or lots
    updates **only those**; every other lot keeps its rows in the output.
 4. **Test run** runs the same choice but writes to a test folder on your PC, so it
    never touches the real output. **Open output folder** shows where that folder is.

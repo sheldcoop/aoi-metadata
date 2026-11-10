@@ -242,3 +242,14 @@ def test_cli_run(settings: Settings, tmp_path: Path, capsys: pytest.CaptureFixtu
     ]
     assert main(args) == 0
     assert "test, lot types: engineering; lots: 20001, x" in capsys.readouterr().out
+
+
+def test_lots_for_tiles(settings: Settings) -> None:
+    chosen = engine.projects(settings)
+    found = engine.lots(settings, chosen)
+    assert [(i.lot_type, i.project, i.part, i.lot) for i in found] == [
+        ("Shippable", "Chiplet4Future", "FHR0020", "19621"),
+        ("Engineering", "ProjX", "PART1", "20001"),
+    ]
+    only = [(t, p) for t, p in chosen if t == "Engineering"]
+    assert [i.lot for i in engine.lots(settings, only)] == ["20001"]

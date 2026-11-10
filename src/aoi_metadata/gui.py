@@ -8,8 +8,9 @@ import sys
 import traceback
 from pathlib import Path
 
-from PySide6.QtCore import QObject, Qt, QThread, Signal
+from PySide6.QtCore import QObject, QSize, Qt, QThread, Signal
 from PySide6.QtWidgets import (
+    QAbstractItemView,
     QApplication,
     QCheckBox,
     QFileDialog,
@@ -18,6 +19,7 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QListView,
     QListWidget,
     QListWidgetItem,
     QMessageBox,
@@ -33,6 +35,7 @@ from aoi_metadata.models import Scope
 from aoi_metadata.settings import Settings, SettingsError, load, save
 
 TASK_NAME = "AOI Metadata Export"
+TILE = QSize(116, 44)  # one lot tile
 
 
 def bat_path() -> Path:
@@ -158,12 +161,42 @@ class Window(QWidget):
         scope_layout.addWidget(self.projects)
         lot_row = QHBoxLayout()
         lot_row.addWidget(QLabel("Lots:"))
-        self.lots = QLineEdit()
-        self.lots.setPlaceholderText("e.g. 19621, 19622   (empty: all lots)")
-        lot_row.addWidget(self.lots, 1)
+        self.lot_filter = QLineEdit()
+        self.lot_filter.setPlaceholderText("type to filter the tiles")
+        self.lot_filter.textChanged.connect(self.filter_lots)
+        lot_row.addWidget(self.lot_filter, 1)
+        load_lots = QPushButton("Load lots")
+        load_lots.setToolTip("Show the lots of the ticked projects (all projects if none ticked)")
+        load_lots.clicked.connect(self.load_lots)
+        all_lots = QPushButton("Select all")
+        all_lots.clicked.connect(lambda: self._select_lots(True))
+        no_lots = QPushButton("Clear")
+        no_lots.clicked.connect(lambda: self._select_lots(False))
+        for button in (load_lots, all_lots, no_lots):
+            lot_row.addWidget(button)
         scope_layout.addLayout(lot_row)
+        # Lots as tiles: click a tile to select it, click again to deselect.
+        self.lot_tiles = QListWidget()
+        self.lot_tiles.setViewMode(QListView.ViewMode.IconMode)
+        self.lot_tiles.setFlow(QListView.Flow.LeftToRight)
+        self.lot_tiles.setWrapping(True)
+        self.lot_tiles.setResizeMode(QListView.ResizeMode.Adjust)
+        self.lot_tiles.setMovement(QListView.Movement.Static)
+        self.lot_tiles.setGridSize(QSize(TILE.width() + 8, TILE.height() + 8))
+        self.lot_tiles.setUniformItemSizes(True)
+        self.lot_tiles.setSelectionMode(QAbstractItemView.SelectionMode.MultiSelection)
+        self.lot_tiles.setMaximumHeight(160)
+        self.lot_tiles.setStyleSheet(
+            "QListWidget::item { border: 1px solid #b8b8b8; border-radius: 4px; }"
+            "QListWidget::item:selected { background: #2f6fbf; color: white;"
+            " border-color: #2f6fbf; }"
+        )
+        self.lot_tiles.itemSelectionChanged.connect(self._lot_count)
+        scope_layout.addWidget(self.lot_tiles)
+        self.lot_status = QLabel("No lot selected: all lots of the choice above.")
+        scope_layout.addWidget(self.lot_status)
         scope_layout.addWidget(QLabel(
-            "Nothing ticked or typed means everything. A run for some projects or lots "
+            "Nothing ticked or selected means everything. A run for some projects or lots "
             "updates only those; all other lots keep their rows in the output."
         ))  # fmt: skip
         row = QHBoxLayout()
@@ -288,8 +321,61 @@ class Window(QWidget):
             QMessageBox.information(self, "Run", "Tick at least one lot type.")
             return None
         lot_types = None if len(types) == len(self.lot_type_boxes) else types
-        lots = [p.strip() for p in self.lots.text().replace(";", ",").split(",") if p.strip()]
+        lots = sorted({item.data(Qt.ItemDataRole.UserRole) for item in self._selected_lots()})
         return Scope.make(lot_types, self._ticked_projects() or None, lots or None)
+
+    # -- lot tiles -------------------------------------------------------------------
+
+    def load_lots(self) -> None:
+        settings = self._current()
+        types = {t for t, box in self.lot_type_boxes.items() if box.isChecked()}
+        ticked = {p.lower() for p in self._ticked_projects()}
+        chosen = [
+            (t, p) for t, p in engine.projects(settings)
+            if t in types and (not ticked or f"{t}/{p.name}".lower() in ticked)
+        ]  # fmt: skip
+        keep = {item.data(Qt.ItemDataRole.UserRole) for item in self._selected_lots()}
+        self.say(f"Looking for lots in {len(chosen)} project(s) ...")
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        try:
+            found = engine.lots(settings, chosen)
+        finally:
+            QApplication.restoreOverrideCursor()
+        self.lot_tiles.clear()
+        for info in found:
+            item = QListWidgetItem(f"{info.lot}\n{info.part or info.project}")
+            item.setData(Qt.ItemDataRole.UserRole, info.lot)
+            item.setToolTip(f"{info.lot_type} / {info.project} / {info.part} / {info.lot}")
+            item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            item.setSizeHint(TILE)
+            self.lot_tiles.addItem(item)
+            item.setSelected(info.lot in keep)
+        self.filter_lots()
+        self._lot_count()
+        self.say(f"{len(found)} lot(s) with an AOI folder found.")
+
+    def filter_lots(self) -> None:
+        text = self.lot_filter.text().strip().lower()
+        for i in range(self.lot_tiles.count()):
+            item = self.lot_tiles.item(i)
+            item.setHidden(bool(text) and text not in item.toolTip().lower())
+
+    def _selected_lots(self) -> list[QListWidgetItem]:
+        return self.lot_tiles.selectedItems()
+
+    def _select_lots(self, selected: bool) -> None:
+        for i in range(self.lot_tiles.count()):
+            item = self.lot_tiles.item(i)
+            if not item.isHidden() or not selected:
+                item.setSelected(selected)
+
+    def _lot_count(self) -> None:
+        count = len(self._selected_lots())
+        total = self.lot_tiles.count()
+        self.lot_status.setText(
+            f"{count} of {total} lot(s) selected." if count
+            else "No lot selected: all lots of the choice above."
+        )  # fmt: skip
 
     def start_scoped(self, test: bool, full_reload: bool = False) -> None:
         scope = self.scope()

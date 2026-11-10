@@ -33,7 +33,7 @@ from openpyxl import load_workbook
 from aoi_metadata import __version__
 from aoi_metadata.models import NOT_VERIFIED, SIDE_KEY, FileRead, FoundFile, IssueRow, Scope
 from aoi_metadata.reader import read_file
-from aoi_metadata.scan import natural_key, scan_project, sort_text
+from aoi_metadata.scan import find_lots, natural_key, scan_project, sort_text
 from aoi_metadata.settings import Settings
 
 logger = logging.getLogger(__name__)
@@ -213,6 +213,27 @@ def projects(settings: Settings) -> list[tuple[str, Path]]:
             continue
         found.extend((lot_type, p) for p in subs)
     return found
+
+
+@dataclass(frozen=True)
+class LotInfo:
+    lot_type: str
+    project: str
+    part: str
+    lot: str
+
+
+def lots(settings: Settings, chosen: list[tuple[str, Path]]) -> list[LotInfo]:
+    """Every lot with an AOI folder in the chosen projects (for picking lots in the window)."""
+
+    def one(job: tuple[str, Path]) -> list[LotInfo]:
+        lot_type, project = job
+        found = find_lots(project, settings.machine_folder, settings.skip_folders)
+        return [LotInfo(lot_type, project.name, part, lot) for part, lot in found]
+
+    with ThreadPoolExecutor(max_workers=settings.workers) as pool:
+        result = [info for infos in pool.map(one, chosen) for info in infos]
+    return sorted(result, key=lambda i: (natural_key(i.lot), i.lot_type, i.project))
 
 
 def _scan(
